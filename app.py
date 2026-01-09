@@ -32,10 +32,10 @@ st.markdown("""
 if 'raw_records' not in st.session_state: st.session_state['raw_records'] = []
 if 'class_df' not in st.session_state: st.session_state['class_df'] = pd.DataFrame()
 
-# --- 2. 側邊欄 (安全版：無外部圖片) ---
+# --- 2. 側邊欄 ---
 with st.sidebar:
-    st.header("🌱 篤行幼兒園") # 改用文字標題
-    st.subheader("評量系統 v2.6 (診斷版)")
+    st.header("🌱 篤行幼兒園")
+    st.subheader("評量系統 v3.0 (Pro 升級版)") # 版本號我幫你改了，紀念這次升級
     
     # 狀態儀表板
     st.markdown("---")
@@ -47,7 +47,7 @@ with st.sidebar:
 
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        st.success("API 連線狀態：🟢 線上")
+        st.success("API 連線狀態：🟢 線上 (Pro引擎)")
     else:
         st.error("❌ API Key 未設定")
         st.stop()
@@ -56,11 +56,12 @@ with st.sidebar:
 
 # --- 3. 核心功能 ---
 
-def get_fast_model():
-    return genai.GenerativeModel('gemini-1.5-flash')
+def get_pro_model():
+    # 關鍵修改：這裡改用 Pro 版本，專門處理複雜手寫辨識
+    return genai.GenerativeModel('gemini-1.5-pro')
 
 def analyze_single_image(image_file):
-    model = get_fast_model()
+    model = get_pro_model() # 使用升級後的模型
     image = Image.open(image_file)
     
     prompt = """
@@ -73,17 +74,18 @@ def analyze_single_image(image_file):
     讀取表格上方那 4 個欄位標題。
 
     【任務三：判斷分數 (座標定位)】
-    每個格子印有 "1 2 3 4"。老師圈選了一個。
-    請看圓圈圈在哪裡：
-    - 圈在 1 -> "A"
-    - 圈在 2 -> "R"
-    - 圈在 3 -> "D"
-    - 圈在 4 -> "N"
+    每個格子印有 "1 2 3 4" 或類似的評量代號。老師圈選了一個。
+    請看圓圈圈在哪裡，如果看不清楚，請根據上下文推斷：
+    - 圈在 1 -> "A" (主動熟練)
+    - 圈在 2 -> "R" (表現良好)
+    - 圈在 3 -> "D" (發展中)
+    - 圈在 4 -> "N" (需協助)
     
     【備註】
     合併格內所有文字，保留編號。
 
     【輸出 JSON】
+    請直接輸出純 JSON 格式，不要有 markdown 標記。
     {
       "area": "語文區",
       "headers": ["指標1", "指標2", "指標3", "指標4"],
@@ -94,9 +96,9 @@ def analyze_single_image(image_file):
     }
     """
     
-    config = genai.types.GenerationConfig(temperature=0.0)
+    config = genai.types.GenerationConfig(temperature=0.0) # 溫度設為 0 確保精準
     
-    # 重試機制 (應對 429 錯誤)
+    # 重試機制
     max_retries = 3
     last_error = ""
     
@@ -115,8 +117,8 @@ def analyze_single_image(image_file):
             
         except Exception as e:
             last_error = str(e)
-            if "429" in last_error: # 塞車了
-                time.sleep(3 * (attempt + 1)) # 休息久一點: 3秒, 6秒...
+            if "429" in last_error: # 流量限制
+                time.sleep(5 * (attempt + 1)) # Pro 版比較大，休息久一點
                 continue
             else:
                 return {"success": False, "error": last_error}
@@ -127,7 +129,7 @@ def process_images_parallel(files):
     results = []
     errors = []
     
-    # 降低併發數到 2，雖然慢一點點，但保證不塞車
+    # Pro 模型比較佔資源，建議將併發數維持在 2 或是 1 以免被 Google 擋
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_to_file = {executor.submit(analyze_single_image, f): f for f in files}
         
@@ -139,7 +141,7 @@ def process_images_parallel(files):
         for future in concurrent.futures.as_completed(future_to_file):
             f = future_to_file[future]
             done += 1
-            info.text(f"正在分析 ({done}/{total}): {f.name}")
+            info.text(f"正在以 Pro 引擎分析 ({done}/{total}): {f.name}")
             bar.progress(done / total)
             
             outcome = future.result()
@@ -148,23 +150,24 @@ def process_images_parallel(files):
             else:
                 errors.append(f"{f.name}: {outcome['error']}")
             
-            # 每張照片處理完稍微休息一下
-            time.sleep(1)
+            # 每個請求間隔休息，避免觸發 API 限制
+            time.sleep(2)
             
     info.empty()
     bar.empty()
     return results, errors
 
 def generate_teacher_comments_fast(student_name, records):
-    model = get_fast_model()
+    model = get_pro_model() # 評語也改用 Pro 版寫，會更通順
     data_text = f"幼兒：{student_name}\n"
     for r in records:
         data_text += f"[{r['area']}] 備註:{r['note']}\n"
         data_text += f"成績:{[d['score'] for d in r['details']]}\n"
 
     prompt = f"""
-    你是幼兒園園長。請為 {student_name} 寫一份【A4精簡版】評語。
-    限制：總字數 200 字內。語氣溫暖。
+    你是一位資深的幼兒園園長。請為 {student_name} 寫一份【A4精簡版】評語。
+    限制：總字數 200 字內。語氣溫暖、具體且正向。
+    請根據上述的學習區表現與備註來撰寫。
     格式 JSON：
     {{ "observation": "觀察...", "suggestion": "建議..." }}
     """
@@ -174,7 +177,7 @@ def generate_teacher_comments_fast(student_name, records):
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
     except:
-        return {"observation": "請親師多加溝通。", "suggestion": "陪伴是最好的禮物。"}
+        return {"observation": "孩子在學校表現穩定，請親師多加溝通。", "suggestion": "陪伴是最好的禮物。"}
 
 def create_word_report(grouped_data):
     doc = Document()
@@ -196,7 +199,7 @@ def create_word_report(grouped_data):
     total = len(grouped_data)
     
     for idx, (name, records) in enumerate(grouped_data.items()):
-        status.text(f"撰寫報告 ({idx+1}/{total}): {name} ...")
+        status.text(f"AI 正在動筆撰寫報告 ({idx+1}/{total}): {name} ...")
         bar.progress((idx+1)/total)
         
         if idx > 0: doc.add_page_break()
@@ -237,6 +240,7 @@ def create_word_report(grouped_data):
                 row_item[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         doc.add_paragraph("")
+        # 呼叫 AI 寫評語
         comments = generate_teacher_comments_fast(name, records)
         
         doc.add_paragraph("【老師的觀察】").runs[0].bold = True
@@ -259,8 +263,8 @@ def create_word_report(grouped_data):
 # --- 4. 主頁面 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 批次處理 (v2.6 診斷版)")
-    st.info("💡 確保穩定：已降低平行處理數量，避免 API 塞車。")
+    st.title("📝 批次處理 (v3.0 Pro 升級版)")
+    st.info("💡 目前使用 Pro 高階模型，辨識速度較慢但準確度高。請耐心等候。")
     
     files = st.file_uploader("選擇照片 (全選)", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
@@ -303,19 +307,19 @@ if menu == "📝 批次上傳與辨識":
             
             st.success(f"✅ 成功處理 {len(results)} 張照片！")
         
-        # 2. 處理失敗的部分 (診斷報告)
+        # 2. 處理失敗的部分
         if errors:
             st.error(f"⚠️ 有 {len(errors)} 張照片處理失敗，原因如下：")
             for err in errors:
-                st.code(err) # 顯示真實錯誤訊息
+                st.code(err)
                 if "429" in err:
-                    st.warning("👉 提示：429 代表 Google API 忙碌中，請等待 1 分鐘後再試。")
+                    st.warning("👉 提示：Pro 模型流量較大，請稍後再試。")
 
     if not st.session_state['class_df'].empty:
         st.dataframe(st.session_state['class_df'])
 
 elif menu == "📄 產生整合評量報告":
-    st.title("📄 報告生成")
+    st.title("📄 報告生成 (Pro 撰寫中)")
     
     if st.session_state['raw_records']:
         grouped = {}
@@ -327,7 +331,7 @@ elif menu == "📄 產生整合評量報告":
         st.write(f"📚 資料庫就緒：共 {len(grouped)} 位幼兒資料。")
 
         if st.button("✨ 點擊這裡產生 Word 檔"):
-            with st.spinner("AI 園長正在動筆寫評語..."):
+            with st.spinner("AI 園長正在動筆寫評語 (Pro 模型運算中)..."):
                 doc_file = create_word_report(grouped)
                 st.session_state['generated_doc'] = doc_file.getvalue()
                 st.success("報告產生完畢！")
@@ -336,7 +340,7 @@ elif menu == "📄 產生整合評量報告":
             st.download_button(
                 label="📥 點我下載 Word 評量報告",
                 data=st.session_state['generated_doc'],
-                file_name="篤行幼兒園_評量報告_v2.6.docx",
+                file_name="篤行幼兒園_評量報告_Pro版.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
             
