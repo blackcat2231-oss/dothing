@@ -6,7 +6,6 @@ import json
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 import io
 import time
@@ -29,33 +28,28 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 初始化 Session State (防止資料遺失) ---
-if 'raw_records' not in st.session_state:
-    st.session_state['raw_records'] = []
-if 'class_df' not in st.session_state:
-    st.session_state['class_df'] = pd.DataFrame()
+# --- 初始化 Session ---
+if 'raw_records' not in st.session_state: st.session_state['raw_records'] = []
+if 'class_df' not in st.session_state: st.session_state['class_df'] = pd.DataFrame()
 
-# --- 2. 側邊欄 (移除易碎的網路圖片) ---
+# --- 2. 側邊欄 (安全版：無外部圖片) ---
 with st.sidebar:
-    # 移除 st.image，改用純文字+Emoji，保證不當機
-    st.header("🌱 篤行幼兒園") 
-    st.subheader("評量系統 v2.5 (穩定版)")
+    st.header("🌱 篤行幼兒園") # 改用文字標題
+    st.subheader("評量系統 v2.6 (診斷版)")
     
-    # 顯示目前資料庫狀態
+    # 狀態儀表板
     st.markdown("---")
-    record_count = len(st.session_state['raw_records'])
-    st.metric("📊 目前已暫存資料", f"{record_count} 筆")
-    if record_count > 0:
-        st.caption("✅ 資料已保存，可前往產生報告")
-    else:
-        st.caption("⚠️ 暫無資料，請先上傳分析")
+    count = len(st.session_state['raw_records'])
+    st.metric("📊 暫存資料數", f"{count} 筆")
+    if count > 0:
+        st.caption("✅ 資料已保存，可產生報告")
     st.markdown("---")
 
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         st.success("API 連線狀態：🟢 線上")
     else:
-        st.error("API Key 未設定")
+        st.error("❌ API Key 未設定")
         st.stop()
         
     menu = st.radio("功能選單", ["📝 批次上傳與辨識", "📄 產生整合評量報告"])
@@ -102,39 +96,45 @@ def analyze_single_image(image_file):
     
     config = genai.types.GenerationConfig(temperature=0.0)
     
+    # 重試機制 (應對 429 錯誤)
     max_retries = 3
+    last_error = ""
+    
     for attempt in range(max_retries):
         try:
             response = model.generate_content([prompt, image], generation_config=config)
             
-            # 強力清潔 JSON
+            # 清潔 JSON
             text = response.text
             if "```json" in text:
                 text = text.replace("```json", "").replace("```", "")
             elif "```" in text:
                 text = text.replace("```", "")
             
-            return json.loads(text.strip())
+            return {"success": True, "data": json.loads(text.strip())}
             
         except Exception as e:
-            if "429" in str(e): # Rate limit
-                time.sleep(2 * (attempt + 1))
+            last_error = str(e)
+            if "429" in last_error: # 塞車了
+                time.sleep(3 * (attempt + 1)) # 休息久一點: 3秒, 6秒...
                 continue
             else:
-                print(f"Error: {e}")
-                return None
-    return None
+                return {"success": False, "error": last_error}
+    
+    return {"success": False, "error": f"重試 {max_retries} 次後失敗。原因: {last_error}"}
 
 def process_images_parallel(files):
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    errors = []
+    
+    # 降低併發數到 2，雖然慢一點點，但保證不塞車
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         future_to_file = {executor.submit(analyze_single_image, f): f for f in files}
         
         bar = st.progress(0)
         info = st.empty()
         total = len(files)
         done = 0
-        success_count = 0
         
         for future in concurrent.futures.as_completed(future_to_file):
             f = future_to_file[future]
@@ -142,14 +142,18 @@ def process_images_parallel(files):
             info.text(f"正在分析 ({done}/{total}): {f.name}")
             bar.progress(done / total)
             
-            data = future.result()
-            if data: 
-                results.append(data)
-                success_count += 1
+            outcome = future.result()
+            if outcome["success"]:
+                results.append(outcome["data"])
+            else:
+                errors.append(f"{f.name}: {outcome['error']}")
+            
+            # 每張照片處理完稍微休息一下
+            time.sleep(1)
             
     info.empty()
     bar.empty()
-    return results
+    return results, errors
 
 def generate_teacher_comments_fast(student_name, records):
     model = get_fast_model()
@@ -174,12 +178,14 @@ def generate_teacher_comments_fast(student_name, records):
 
 def create_word_report(grouped_data):
     doc = Document()
-    section = doc.sections[0]
-    section.top_margin = Cm(1.27)
-    section.bottom_margin = Cm(1.27)
-    section.left_margin = Cm(1.27)
-    section.right_margin = Cm(1.27)
+    # 設定邊界
+    for section in doc.sections:
+        section.top_margin = Cm(1.27)
+        section.bottom_margin = Cm(1.27)
+        section.left_margin = Cm(1.27)
+        section.right_margin = Cm(1.27)
     
+    # 設定字型
     style = doc.styles['Normal']
     style.font.name = 'Microsoft JhengHei'
     style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
@@ -190,11 +196,12 @@ def create_word_report(grouped_data):
     total = len(grouped_data)
     
     for idx, (name, records) in enumerate(grouped_data.items()):
-        status.text(f"正在撰寫報告 ({idx+1}/{total}): {name} ...")
+        status.text(f"撰寫報告 ({idx+1}/{total}): {name} ...")
         bar.progress((idx+1)/total)
         
         if idx > 0: doc.add_page_break()
         
+        # 標題
         head = doc.add_heading('篤行非營利幼兒園  幼兒學習區個別評量報告', 0)
         head.alignment = WD_ALIGN_PARAGRAPH.CENTER
         head.style.font.size = Pt(16)
@@ -252,14 +259,15 @@ def create_word_report(grouped_data):
 # --- 4. 主頁面 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 批次處理 (v2.5 穩定版)")
-    st.info("💡 請上傳照片，系統會自動清潔格式並存入暫存區。")
+    st.title("📝 批次處理 (v2.6 診斷版)")
+    st.info("💡 確保穩定：已降低平行處理數量，避免 API 塞車。")
     
     files = st.file_uploader("選擇照片 (全選)", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
     if files and st.button("🚀 開始分析"):
-        results = process_images_parallel(files)
+        results, errors = process_images_parallel(files)
         
+        # 1. 處理成功的部分
         if results:
             all_data = []
             raw_records = []
@@ -284,18 +292,24 @@ if menu == "📝 批次上傳與辨識":
                         "note": s.get("note")
                     })
             
-            # 使用 append 邏輯確保資料累加
+            # 追加資料
             if 'raw_records' not in st.session_state: st.session_state['raw_records'] = []
-            st.session_state['raw_records'] = raw_records 
+            st.session_state['raw_records'].extend(raw_records)
             
+            # 更新顯示表格
             if 'class_df' not in st.session_state: st.session_state['class_df'] = pd.DataFrame()
-            st.session_state['class_df'] = pd.DataFrame(all_data)
+            new_df = pd.DataFrame(all_data)
+            st.session_state['class_df'] = pd.concat([st.session_state['class_df'], new_df], ignore_index=True)
             
-            st.success(f"✅ 成功處理 {len(results)} 張照片，已存入暫存區！")
-            st.info("👉 現在請點擊左側「📄 產生整合評量報告」")
-            
-        else:
-            st.error("❌ 分析失敗：沒有任何照片被成功讀取。請檢查 API Key 是否正常或重試。")
+            st.success(f"✅ 成功處理 {len(results)} 張照片！")
+        
+        # 2. 處理失敗的部分 (診斷報告)
+        if errors:
+            st.error(f"⚠️ 有 {len(errors)} 張照片處理失敗，原因如下：")
+            for err in errors:
+                st.code(err) # 顯示真實錯誤訊息
+                if "429" in err:
+                    st.warning("👉 提示：429 代表 Google API 忙碌中，請等待 1 分鐘後再試。")
 
     if not st.session_state['class_df'].empty:
         st.dataframe(st.session_state['class_df'])
@@ -310,7 +324,7 @@ elif menu == "📄 產生整合評量報告":
             if name not in grouped: grouped[name] = []
             grouped[name].append(r)
         
-        st.write(f"📚 資料庫就緒：共 {len(grouped)} 位幼兒的完整紀錄。")
+        st.write(f"📚 資料庫就緒：共 {len(grouped)} 位幼兒資料。")
 
         if st.button("✨ 點擊這裡產生 Word 檔"):
             with st.spinner("AI 園長正在動筆寫評語..."):
@@ -318,12 +332,11 @@ elif menu == "📄 產生整合評量報告":
                 st.session_state['generated_doc'] = doc_file.getvalue()
                 st.success("報告產生完畢！")
         
-        # 只要檔案存在，就顯示下載按鈕
         if 'generated_doc' in st.session_state:
             st.download_button(
                 label="📥 點我下載 Word 評量報告",
                 data=st.session_state['generated_doc'],
-                file_name="篤行幼兒園_全班評量報告_v2.5.docx",
+                file_name="篤行幼兒園_評量報告_v2.6.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
             
