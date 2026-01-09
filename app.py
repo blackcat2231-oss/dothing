@@ -4,9 +4,10 @@ from PIL import Image
 import pandas as pd
 import json
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
 import io
 import time
 
@@ -32,7 +33,7 @@ st.markdown("""
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2231/2231649.png", width=100)
     st.title("🌱 篤行幼兒園")
-    st.subheader("評量系統 v1.7 (家長報告版)")
+    st.subheader("評量系統 v1.8 (全能整合版)")
     
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -42,7 +43,7 @@ with st.sidebar:
         st.stop()
         
     st.markdown("---")
-    menu = st.radio("功能選單", ["📝 批次上傳與辨識", "📄 匯出家長報告"])
+    menu = st.radio("功能選單", ["📝 批次上傳與辨識", "📄 產生整合評量報告"])
 
 # --- 3. 核心功能函式 ---
 
@@ -63,22 +64,25 @@ def get_gemini_model():
     return genai.GenerativeModel('gemini-1.5-flash'), 'fallback-flash'
 
 def analyze_image(image):
-    """AI 辨識核心"""
+    """AI 辨識核心：加入學習區判斷"""
     model, model_name = get_gemini_model()
     
     prompt = """
-    你是一位細心的資料輸入員。請分析這張幼兒園評量表。
+    你是一位專業的資料輸入員。請分析這張幼兒園評量表。
     
-    【步驟一：讀取表頭指標】
+    【任務一：判斷學習區】
+    請閱讀表頭，判斷這張表屬於哪個學習區？(例如：語文區、數學區、美勞區、積木區、體能區...)。
+    請將結果放入 "area" 欄位。
+
+    【任務二：讀取表頭指標】
     請讀取表格最上方、位於「幼兒姓名」與「備註」中間的那 4 個欄位標題文字。
     
-    【步驟二：讀取幼兒資料】
+    【任務三：讀取幼兒資料】
     請依序讀取每一列幼兒的資料。
     
-    **關於「備註」欄位的特別指示：**
-    1. 請務必將**同一個格子內的所有文字**合併成一個字串。
-    2. **嚴禁**將備註裡的換行誤判為下一位幼兒。
-    3. 如果備註有分點，請保留編號（如 1. 或 ①）。
+    **關於「備註」的指示：**
+    1. 將格子內所有文字合併。
+    2. 保留換行或編號 (①, 1.)。
 
     **關於「分數」的判斷：**
     - 圈選 1 -> "A"
@@ -87,11 +91,12 @@ def analyze_image(image):
     - 圈選 4 -> "N"
 
     【輸出格式】
-    請回傳 JSON：
+    回傳 JSON：
     {
+      "area": "語文區",
       "headers": ["指標1文字", "指標2文字", "指標3文字", "指標4文字"],
       "students": [
-        {"name": "幼兒一", "scores": ["A", "R", "A", "R"], "note": "備註內容"},
+        {"name": "幼兒一", "scores": ["A", "R", "A", "R"], "note": "備註內容..."},
         ...
       ]
     }
@@ -104,87 +109,134 @@ def analyze_image(image):
     except:
         return None
 
-def generate_individual_report(df):
-    """將資料轉為 Word 檔 (一頁一位幼兒)"""
-    doc = Document()
+def generate_teacher_comments(student_name, records):
+    """
+    AI 寫手核心：
+    將該位幼兒的所有區域資料打包，請 AI 寫出像範例一樣的「綜合觀察」與「居家建議」。
+    """
+    model, _ = get_gemini_model()
     
-    # 設定整份文件的字型 (微軟正黑體)
+    # 將資料轉為文字描述給 AI 看
+    data_summary = f"幼兒姓名：{student_name}\n"
+    for r in records:
+        data_summary += f"--- {r['area']} ---\n"
+        data_summary += f"指標與成績：{r['details']}\n" # details 包含指標名稱與分數
+        data_summary += f"老師原始備註：{r['note']}\n"
+    
+    prompt = f"""
+    你是一位資深的幼兒園園長與教育專家。請根據以下這位幼兒在不同學習區的評量數據與老師備註，撰寫一份給家長的綜合評語。
+    
+    【幼兒資料】
+    {data_summary}
+    
+    【撰寫目標】
+    請模仿以下風格，撰寫兩個段落：
+    
+    1. **【老師的觀察】**：
+       - 綜合所有區域的表現，找出孩子的亮點（哪裡表現好/A級）。
+       - 溫柔地指出需要協助的地方（哪裡是D或N），並將其描述為「發展中的珍貴階段」。
+       - 語氣要溫暖、正向、專業。
+       - 如果原始備註有具體事件（如「恐龍王國」），請務必寫進去，讓故事更生動。
+       
+    2. **【居家互動小撇步】**：
+       - 針對孩子較弱的項目（R/D/N），給家長具體、簡單、可在家進行的遊戲或互動建議。
+       - 如果孩子都很好，則建議如何延伸挑戰。
+    
+    【輸出格式】
+    請直接回傳 JSON，不要 markdown：
+    {{
+        "observation": "這裡寫老師的觀察段落...",
+        "suggestion": "這裡寫居家互動小撇步..."
+    }}
+    """
+    
+    config = genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json") # 稍微提高溫度讓文筆更好
+    try:
+        response = model.generate_content(prompt, generation_config=config)
+        return json.loads(response.text)
+    except:
+        return {"observation": "AI 撰寫中...", "suggestion": "建議親師保持密切聯繫。"}
+
+def create_integrated_word(grouped_data):
+    """產生整合版 Word 報告"""
+    doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Microsoft JhengHei'
-    style.element.rPr.rFonts.set(object.__name__, 'Microsoft JhengHei')
+    style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft JhengHei')
     
-    # 取得所有指標欄位名稱 (排除 姓名 和 備註)
-    indicator_cols = [c for c in df.columns if c not in ['幼兒姓名', '備註']]
-
-    # 針對每一位幼兒產生一頁報告
-    for index, row in df.iterrows():
-        # 如果不是第一位，就換頁
-        if index > 0:
-            doc.add_page_break()
-            
-        # 1. 標題區
-        heading = doc.add_heading('篤行幼兒園 - 幼兒學習評量報告', level=0)
-        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # 進度顯示
+    progress_text = "正在撰寫報告..."
+    my_bar = st.progress(0, text=progress_text)
+    total_students = len(grouped_data)
+    
+    for idx, (name, records) in enumerate(grouped_data.items()):
+        # 更新進度
+        my_bar.progress((idx + 1) / total_students, text=f"正在為 {name} 撰寫評語 ({idx+1}/{total_students})...")
         
-        doc.add_paragraph("") # 空行
+        if idx > 0: doc.add_page_break()
         
-        # 2. 學生姓名與基本資料
-        p = doc.add_paragraph()
-        p.add_run(f"幼兒姓名：").bold = True
-        p.add_run(f"{row['幼兒姓名']}").bold = True
-        p.add_run(f"\t\t\t日期：2026年___月___日") # 預留日期欄位
+        # 1. 標題
+        head = doc.add_heading('篤行非營利幼兒園', 0)
+        head.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sub = doc.add_paragraph('幼兒學習區個別評量報告')
+        sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sub.runs[0].bold = True
+        sub.runs[0].font.size = Pt(14)
         
-        doc.add_paragraph("") # 空行
-
-        # 3. 評量指標表 (Table)
-        # 建立一個表格：左邊是指標內容，右邊是成績
+        doc.add_paragraph(f"幼兒姓名：{name} \t\t\t 日期：2026年___月___日")
+        
+        # 2. 呼叫 AI 進行綜合寫作 (這是最花時間的一步)
+        ai_comments = generate_teacher_comments(name, records)
+        
+        # 3. 建立大表格 (包含各區)
+        doc.add_paragraph("■ 各區學習指標明細").runs[0].bold = True
+        
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        hdr = table.rows[0].cells
+        hdr[0].text = "學習指標"
+        hdr[1].text = "評量結果"
         
-        # 表頭
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = "學習指標內容"
-        hdr_cells[1].text = "評量結果"
-        
-        # 設定表頭寬度與樣式
-        for cell in hdr_cells:
-            cell.paragraphs[0].runs[0].font.bold = True
-            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # 填入各區資料
+        for record in records:
+            # 加入區域標題列 (例如：語文區)
+            row_area = table.add_row().cells
+            row_area[0].merge(row_area[1])
+            run = row_area[0].paragraphs[0].add_run(f"【{record['area']}】")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0, 102, 204) # 藍色標題
+            row_area[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
             
-        # 填入每一個指標
-        for col_name in indicator_cols:
-            row_cells = table.add_row().cells
-            row_cells[0].text = col_name # 左邊放指標文字
-            row_cells[1].text = str(row[col_name]) # 右邊放分數 A/R/D/N
-            
-            # 讓分數置中
-            row_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-        doc.add_paragraph("") # 空行
+            # 加入該區的指標
+            # record['details'] 是一個 list: [{"idx": "能閱讀...", "score": "A"}, ...]
+            for item in record['details']:
+                row = table.add_row().cells
+                row[0].text = item['idx']
+                row[1].text = item['score']
+                row[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # 4. 老師的話 (備註區)
-        doc.add_heading('💡 老師的觀察與建議：', level=2)
-        note_content = row['備註'] if row['備註'] else "（本次無特殊備註）"
-        doc.add_paragraph(note_content)
+        doc.add_paragraph("")
         
-        doc.add_paragraph("") # 空行
-        doc.add_paragraph("") # 空行
-
-        # 5. 頁尾說明
-        footer = doc.add_paragraph()
-        footer.add_run("--------------------------------------------------").bold = True
+        # 4. 寫入 AI 生成的評語
+        doc.add_heading('親師交流與建議', level=2)
+        
+        obs_title = doc.add_paragraph("【老師的觀察】")
+        obs_title.runs[0].bold = True
+        doc.add_paragraph(ai_comments['observation'])
+        
+        sug_title = doc.add_paragraph("【居家互動小撇步】")
+        sug_title.runs[0].bold = True
+        doc.add_paragraph(ai_comments['suggestion'])
+        
+        doc.add_paragraph("")
+        
+        # 5. 頁尾
+        footer = doc.add_paragraph("評量代號說明： A(主動熟練)  R(表現良好)  D(發展中/需示範)  N(未觀察/需協助)")
         footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        legend = doc.add_paragraph()
-        legend.add_run("評量代號說明：\n").bold = True
-        legend.add_run("A (Excellent) - 表現優異，能熟練掌握\n")
-        legend.add_run("R (Good) - 表現良好，穩定發展中\n")
-        legend.add_run("D (Developing) - 發展中，偶爾需要引導\n")
-        legend.add_run("N (Needs Improvement) - 需加強，建議親師共同協助")
-        legend.style = 'Quote' # 用引用樣式讓字體稍微變小
+        footer.style = 'Quote'
 
-    # 存到記憶體
+    my_bar.empty()
+    
     bio = io.BytesIO()
     doc.save(bio)
     return bio
@@ -199,87 +251,89 @@ def color_grade(val):
 # --- 4. 主頁面邏輯 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 評量表批次處理中心")
-    st.info("💡 您現在可以一次選取多張照片，系統會自動排隊處理。")
+    st.title("📝 評量表批次處理 (v1.8)")
+    st.info("💡 請上傳不同學習區的照片（例如：語文區照片+數學區照片），系統會自動識別並分類。")
     
-    uploaded_files = st.file_uploader("請選擇評量表照片 (可多選)", type=['jpg', 'png', 'jpeg', 'heic'], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("請選擇評量表照片", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
     
-    if uploaded_files:
-        st.write(f"共選擇了 {len(uploaded_files)} 張照片")
+    if uploaded_files and st.button("🚀 開始分析並歸檔"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        if st.button("🚀 開始批次辨識"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        all_data = [] # 用來存 DataFrame
+        raw_records = [] # 用來存原始結構資料 (給 Word 生成用)
+
+        for i, file in enumerate(uploaded_files):
+            status_text.text(f"正在分析第 {i+1} 張照片...")
+            image = Image.open(file)
+            result = analyze_image(image)
             
-            all_processed_data = []
-            headers_cache = ["指標1", "指標2", "指標3", "指標4"]
-
-            for i, file in enumerate(uploaded_files):
-                status_text.text(f"正在分析第 {i+1} 張照片：{file.name} ...")
+            if result:
+                area = result.get("area", "未知區域")
+                headers = result.get("headers", ["指標1","指標2","指標3","指標4"])[:4]
                 
-                image = Image.open(file)
-                result_json = analyze_image(image)
-                
-                if result_json:
-                    current_headers = result_json.get("headers", [])
-                    if len(current_headers) >= 4:
-                        headers_cache = current_headers[:4]
+                for s in result.get("students", []):
+                    # 1. 存入 DataFrame 用的扁平資料
+                    row = {"幼兒姓名": s.get("name"), "學習區": area}
+                    scores = s.get("scores", [])
+                    for idx, score in enumerate(scores):
+                        if idx < 4: row[headers[idx]] = score
+                    row["備註"] = s.get("note")
+                    all_data.append(row)
+                    
+                    # 2. 存入結構化資料 (給 AI 寫作用)
+                    details = []
+                    for idx, score in enumerate(scores):
+                        if idx < 4:
+                            details.append({"idx": headers[idx], "score": score})
+                            
+                    raw_records.append({
+                        "name": s.get("name"),
+                        "area": area,
+                        "details": details,
+                        "note": s.get("note")
+                    })
 
-                    for s in result_json.get("students", []):
-                        row = {"幼兒姓名": s.get("name", "")}
-                        scores = s.get("scores", [])
-                        for idx, score in enumerate(scores):
-                            if idx < 4:
-                                row[f"指標{idx+1}"] = score 
-                        row["備註"] = s.get("note", "")
-                        all_processed_data.append(row)
-                
-                progress_bar.progress((i + 1) / len(uploaded_files))
-                time.sleep(1)
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            time.sleep(1)
 
-            status_text.text("✅ 所有照片分析完成！")
-            
-            if all_processed_data:
-                df = pd.DataFrame(all_processed_data)
-                rename_map = {f"指標{i+1}": name for i, name in enumerate(headers_cache)}
-                df = df.rename(columns=rename_map)
-                
-                st.session_state['class_data'] = df
-                st.success(f"已成功彙整 {len(df)} 筆資料！")
+        if all_data:
+            st.session_state['class_df'] = pd.DataFrame(all_data)
+            st.session_state['raw_records'] = raw_records # 這是生成 Word 的關鍵
+            st.success(f"已成功讀取 {len(uploaded_files)} 張表單，共 {len(all_data)} 筆紀錄！")
 
-    if 'class_data' in st.session_state:
+    if 'class_df' in st.session_state:
         st.divider()
-        st.subheader("📊 資料檢視")
-        df = st.session_state['class_data']
-        score_cols = [c for c in df.columns if c not in ["幼兒姓名", "備註"]]
-        
-        edited_df = st.data_editor(
-            df.style.map(color_grade, subset=score_cols),
-            use_container_width=True,
-            num_rows="dynamic",
-            height=600
-        )
-        st.session_state['class_data'] = edited_df.data
+        st.subheader("📊 資料預覽")
+        st.dataframe(st.session_state['class_df'], use_container_width=True)
 
-elif menu == "📄 匯出家長報告":
-    st.title("📄 家長通知單匯出")
+elif menu == "📄 產生整合評量報告":
+    st.title("📄 整合評量報告生成中心")
     
-    if 'class_data' in st.session_state and not st.session_state['class_data'].empty:
-        df = st.session_state['class_data']
-        st.success(f"目前準備匯出 {len(df)} 位幼兒的個別報告。")
+    if 'raw_records' in st.session_state and len(st.session_state['raw_records']) > 0:
+        records = st.session_state['raw_records']
         
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.info("點擊下方按鈕，下載後的 Word 檔將會是「每位幼兒一頁」，方便您直接列印發放。")
+        # 依姓名進行歸戶 (Grouping)
+        grouped_data = {}
+        for r in records:
+            name = r['name']
+            if name not in grouped_data:
+                grouped_data[name] = []
+            grouped_data[name].append(r)
             
-            # 產生 Word 檔
-            doc_file = generate_individual_report(df)
+        st.success(f"目前資料庫中共有 {len(grouped_data)} 位幼兒的完整學習歷程。")
+        st.info("點擊下方按鈕後，AI 將會為每一位幼兒「閱讀」所有區域的成績，並撰寫客製化的觀察報告。這可能需要幾分鐘，請耐心等候。")
+        
+        if st.button("✨ 啟動 AI 寫作並下載報告"):
+            doc_file = create_integrated_word(grouped_data)
             
             st.download_button(
-                label="📥 下載個別評量報告 (Word)",
+                label="📥 下載全班整合報告 (Word)",
                 data=doc_file,
-                file_name="篤行幼兒園_個別評量報告.docx",
+                file_name="篤行幼兒園_全班整合評量報告.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+            st.balloons()
+            
     else:
-        st.warning("⚠️ 目前還沒有資料，請先去「批次上傳」頁面分析照片。")
+        st.warning("⚠️ 尚無資料，請先至「批次上傳」頁面分析照片。")
