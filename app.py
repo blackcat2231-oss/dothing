@@ -7,7 +7,7 @@ import json
 # --- 1. 網頁基本設定 ---
 st.set_page_config(page_title="篤行幼兒園評量系統", layout="wide", page_icon="🌱")
 
-# 自訂 CSS 讓介面更像專業軟體
+# 自訂 CSS
 st.markdown("""
     <style>
     .main {background-color: #f9f9f9;}
@@ -20,7 +20,7 @@ st.markdown("""
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2231/2231649.png", width=100)
     st.title("🌱 篤行幼兒園")
-    st.subheader("評量整合系統 v1.0")
+    st.subheader("評量整合系統 v1.1")
     
     # API Key 檢查
     if "GEMINI_API_KEY" in st.secrets:
@@ -33,13 +33,36 @@ with st.sidebar:
     st.markdown("---")
     menu = st.radio("功能選單", ["📝 評量表批次辨識", "📊 班級熱圖分析", "👶 個人成長報告(開發中)"])
 
-# --- 3. 核心功能函式 ---
+# --- 3. 核心功能函式 (新增：自動尋找正確模型) ---
+
+def get_gemini_model():
+    """自動從 Google 帳號中尋找可用的 Flash 模型，避免名稱錯誤"""
+    try:
+        # 先列出所有可用模型
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # 優先尋找名字裡有 flash 的模型
+                if 'flash' in m.name:
+                    return genai.GenerativeModel(m.name)
+        
+        # 如果沒找到 flash，就用第一個可用的模型 (例如 pro)
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                return genai.GenerativeModel(m.name)
+                
+    except Exception as e:
+        st.error(f"模型偵測失敗: {e}")
+    
+    # 萬一真的都失敗，才用預設值
+    return genai.GenerativeModel('gemini-1.5-flash')
 
 def analyze_image(image):
     """呼叫 AI 辨識圖片中的表格數據"""
-    model = genai.GenerativeModel('gemini-1.5-flash') # 使用最快且穩定的 Flash 模型
     
-    # 這是給 AI 的精確指令，要求它只回傳 JSON 格式
+    # 改用自動偵測的模型，不再寫死名字
+    model = get_gemini_model()
+    
+    # 這是給 AI 的精確指令
     prompt = """
     你是一位專業的資料輸入員。請辨識這張幼兒園評量表的圖片。
     
@@ -65,7 +88,6 @@ def analyze_image(image):
     with st.spinner('🤖 AI 正在用力閱讀老師的手寫字...'):
         try:
             response = model.generate_content([prompt, image])
-            # 嘗試清理 AI 回傳的文字，確保是純 JSON
             json_text = response.text.replace("```json", "").replace("```", "").strip()
             data = json.loads(json_text)
             return data
@@ -75,10 +97,10 @@ def analyze_image(image):
 
 def color_grade(val):
     """熱圖的顏色設定"""
-    if val == 'A': return 'background-color: #d4edda; color: green' # 綠
-    if val == 'R': return 'background-color: #fff3cd; color: #856404' # 黃
-    if val == 'D': return 'background-color: #ffeeba; color: orange' # 橘
-    if val == 'N': return 'background-color: #f8d7da; color: red'   # 紅
+    if val == 'A': return 'background-color: #d4edda; color: green'
+    if val == 'R': return 'background-color: #fff3cd; color: #856404'
+    if val == 'D': return 'background-color: #ffeeba; color: orange'
+    if val == 'N': return 'background-color: #f8d7da; color: red'
     return ''
 
 # --- 4. 主頁面邏輯 ---
@@ -94,22 +116,16 @@ if menu == "📝 評量表批次辨識":
         st.image(image, caption='預覽照片', width=400)
         
         if st.button("🚀 開始智慧辨識"):
-            # 1. AI 分析
             result_data = analyze_image(image)
             
             if result_data:
-                # 2. 轉為表格
                 df = pd.DataFrame(result_data)
-                
                 st.subheader("✅ 辨識結果 (可直接點擊修改)")
-                # 3. 顯示可編輯的表格 (Data Editor)
                 edited_df = st.data_editor(df, use_container_width=True)
                 
-                # 4. 暫存功能 (模擬資料庫)
                 if st.button("💾 確認並儲存資料"):
                     if 'class_data' not in st.session_state:
                         st.session_state['class_data'] = pd.DataFrame()
-                    # 合併資料
                     st.session_state['class_data'] = pd.concat([st.session_state['class_data'], edited_df], ignore_index=True)
                     st.success(f"已成功儲存 {len(edited_df)} 筆幼兒資料！請前往「班級熱圖分析」查看。")
 
@@ -119,20 +135,15 @@ elif menu == "📊 班級熱圖分析":
     if 'class_data' in st.session_state and not st.session_state['class_data'].empty:
         df = st.session_state['class_data']
         
-        # 顯示統計數據
         col1, col2, col3 = st.columns(3)
         col1.metric("已登錄幼兒數", len(df))
-        col2.metric("主要學習區", "語文區") # 這裡之後可以改成自動抓取
+        col2.metric("主要學習區", "語文區")
         col3.metric("待加強 (N) 總數", int((df == 'N').sum().sum()))
 
         st.markdown("### 🚦 分數分佈熱圖")
-        st.caption("A=綠 (優秀), R=黃 (良好), D=橘 (發展中), N=紅 (需協助)")
-        
-        # 應用顏色樣式
         styler = df.style.map(color_grade)
         st.dataframe(styler, use_container_width=True)
         
-        # AI 簡易評語
         if st.button("🤖 請 AI 分析全班狀況"):
             with st.spinner("AI 正在分析全班資料..."):
                 n_count = (df == 'N').sum().sum()
@@ -145,4 +156,4 @@ elif menu == "📊 班級熱圖分析":
 
 elif menu == "👶 個人成長報告(開發中)":
     st.title("👶 綜合成長故事")
-    st.info("🚧 此功能建置中... 未來這裡將一鍵生成 Word 格式的親師溝通報告。")
+    st.info("🚧 此功能建置中...")
