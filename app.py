@@ -6,6 +6,7 @@ import json
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 import io
 import time
@@ -18,13 +19,17 @@ st.markdown("""
     <style>
     .main {background-color: #f9f9f9;}
     .stHeader {color: #2c3e50;}
-    /* 讓表格好看一點 */
     th {
         white-space: normal !important;
         background-color: #f0f2f6 !important;
     }
     td {text-align: center !important; vertical-align: middle !important;}
     td:last-child {text-align: left !important;}
+    /* 加大按鈕讓它好按一點 */
+    .stButton button {
+        width: 100%;
+        font-weight: bold;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -32,7 +37,7 @@ st.markdown("""
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2231/2231649.png", width=100)
     st.title("🌱 篤行幼兒園")
-    st.subheader("評量系統 v2.2 (Flash戰術版)")
+    st.subheader("評量系統 v2.3 (按鈕修復版)")
     
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -44,23 +49,15 @@ with st.sidebar:
     st.markdown("---")
     menu = st.radio("功能選單", ["📝 批次上傳與辨識", "📄 產生整合評量報告"])
 
-# --- 3. 核心功能 (速度優先策略) ---
+# --- 3. 核心功能 (維持 v2.2 的極速邏輯) ---
 
 def get_fast_model():
-    """
-    為了避免 '8分鐘慘劇'，我們強制使用 Flash。
-    Flash 的速率限制比 Pro 寬鬆很多 (15 RPM vs 2 RPM)。
-    """
     return genai.GenerativeModel('gemini-1.5-flash')
 
 def analyze_single_image(image_file):
-    """
-    單張分析：使用 v1.4 的「座標定位」邏輯來彌補 Flash 的視力
-    """
     model = get_fast_model()
     image = Image.open(image_file)
     
-    # 這是您覺得最準的 v1.4 指令
     prompt = """
     你是一位精準的資料輸入員。這是一張幼兒園評量表。
     
@@ -72,7 +69,7 @@ def analyze_single_image(image_file):
 
     【任務三：判斷分數 (座標定位)】
     每個格子印有 "1 2 3 4"。老師圈選了一個。
-    請像玩「找不同」一樣，看圓圈圈在哪裡：
+    請看圓圈圈在哪裡：
     - 圈在 1 -> "A"
     - 圈在 2 -> "R"
     - 圈在 3 -> "D"
@@ -92,34 +89,26 @@ def analyze_single_image(image_file):
     }
     """
     
-    # Temperature 0 是準確的關鍵
     config = genai.types.GenerationConfig(temperature=0.0, response_mime_type="application/json")
     
-    # 加入重試機制，萬一還是太快被擋，休息一下再試
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content([prompt, image], generation_config=config)
             return json.loads(response.text)
         except Exception as e:
-            if "429" in str(e): # 如果是 Too Many Requests
-                time.sleep(2 * (attempt + 1)) # 等待 2, 4, 6 秒
+            if "429" in str(e):
+                time.sleep(2 * (attempt + 1))
                 continue
             else:
-                print(f"Error: {e}")
                 return None
     return None
 
 def process_images_parallel(files):
-    """
-    平行處理，但限制同時 4 個，避免塞車
-    """
     results = []
-    # max_workers=4 是安全值
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         future_to_file = {executor.submit(analyze_single_image, f): f for f in files}
         
-        # 進度條
         bar = st.progress(0)
         info = st.empty()
         total = len(files)
@@ -141,15 +130,11 @@ def process_images_parallel(files):
     return results
 
 def generate_teacher_comments_fast(student_name, records):
-    """
-    寫評語也改用 Flash，不然 24 位學生用 Pro 寫會跑 10 分鐘以上。
-    """
     model = get_fast_model()
     
     data_text = f"幼兒：{student_name}\n"
     for r in records:
         data_text += f"[{r['area']}] 備註:{r['note']}\n"
-        # 簡化分數描述以免 token 太多
         data_text += f"成績:{[d['score'] for d in r['details']]}\n"
 
     prompt = f"""
@@ -168,7 +153,6 @@ def generate_teacher_comments_fast(student_name, records):
 def create_word_report(grouped_data):
     doc = Document()
     
-    # 設定邊界 (1.27cm)
     section = doc.sections[0]
     section.top_margin = Cm(1.27)
     section.bottom_margin = Cm(1.27)
@@ -190,7 +174,6 @@ def create_word_report(grouped_data):
         
         if idx > 0: doc.add_page_break()
         
-        # 標題
         head = doc.add_heading('篤行非營利幼兒園  幼兒學習區個別評量報告', 0)
         head.alignment = WD_ALIGN_PARAGRAPH.CENTER
         head.style.font.size = Pt(16)
@@ -201,21 +184,17 @@ def create_word_report(grouped_data):
         run.bold = True
         run.font.size = Pt(12)
         
-        # 表格 (自動調整寬度)
         table = doc.add_table(rows=1, cols=2)
         table.style = 'Table Grid'
-        # 不鎖死寬度，讓 Word 自己算，避免消失
         
         hdr = table.rows[0].cells
         hdr[0].text = "各區學習指標內容"
         hdr[1].text = "結果"
         
-        # 手動給個大概比例，引導 Word
         table.columns[0].width = Cm(14)
         table.columns[1].width = Cm(3)
         
         for r in records:
-            # 區域名稱
             row = table.add_row().cells
             row[0].merge(row[1])
             p_area = row[0].paragraphs[0]
@@ -227,13 +206,11 @@ def create_word_report(grouped_data):
                 row_item = table.add_row().cells
                 row_item[0].text = item['idx']
                 row_item[0].paragraphs[0].paragraph_format.left_indent = Cm(0.5)
-                
                 row_item[1].text = item['score']
                 row_item[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         doc.add_paragraph("")
         
-        # 評語
         comments = generate_teacher_comments_fast(name, records)
         
         doc.add_paragraph("【老師的觀察】").runs[0].bold = True
@@ -257,8 +234,8 @@ def create_word_report(grouped_data):
 # --- 4. 主頁面 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 批次處理 (v2.2 極速版)")
-    st.info("💡 使用 Flash 引擎 + 座標定位技術，確保速度與準確度的平衡。")
+    st.title("📝 批次處理 (v2.3 按鈕修復版)")
+    st.info("💡 確保您的照片已經上傳並分析完成。")
     
     files = st.file_uploader("選擇照片 (全選)", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
@@ -272,20 +249,16 @@ if menu == "📝 批次上傳與辨識":
                 area = res.get("area","未知")
                 headers = res.get("headers", ["I1","I2","I3","I4"])
                 for s in res.get("students", []):
-                    # 存檔邏輯
                     row = {"幼兒姓名":s.get("name"), "學習區":area}
                     scores = s.get("scores", [])
-                    
                     details = []
                     for i, sc in enumerate(scores):
                         if i < 4: 
                             h_name = headers[i] if i < len(headers) else f"指標{i+1}"
                             row[h_name] = sc
                             details.append({"idx": h_name, "score": sc})
-                            
                     row["備註"] = s.get("note")
                     all_data.append(row)
-                    
                     raw_records.append({
                         "name": s.get("name"),
                         "area": area,
@@ -308,7 +281,25 @@ elif menu == "📄 產生整合評量報告":
             name = r['name']
             if name not in grouped: grouped[name] = []
             grouped[name].append(r)
+        
+        st.write(f"目前有 {len(grouped)} 位幼兒的資料準備生成。")
+
+        # 1. 產生報告按鈕
+        if st.button("✨ 點擊這裡產生 Word 檔"):
+            with st.spinner("正在努力寫報告，請稍候..."):
+                doc_file = create_word_report(grouped)
+                # 關鍵修正：把產生的檔案存入 Session State
+                st.session_state['generated_doc'] = doc_file.getvalue()
+                st.success("報告產生完畢！請按下方按鈕下載。")
+        
+        # 2. 下載按鈕 (只要 Session 裡有檔案，這個按鈕就會一直存在)
+        if 'generated_doc' in st.session_state:
+            st.download_button(
+                label="📥 點我下載 Word 評量報告",
+                data=st.session_state['generated_doc'],
+                file_name="篤行幼兒園_全班評量報告_v2.3.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
             
-        if st.button("✨ 下載 Word"):
-            doc = create_word_report(grouped)
-            st.download_button("📥 下載", doc, "評量報告_v2.2.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    else:
+        st.warning("⚠️ 請先回上一頁上傳並分析照片。")
