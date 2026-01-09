@@ -25,20 +25,32 @@ st.markdown("""
     }
     td {text-align: center !important; vertical-align: middle !important;}
     td:last-child {text-align: left !important;}
-    /* 加大按鈕讓它好按一點 */
-    .stButton button {
-        width: 100%;
-        font-weight: bold;
-    }
+    .stButton button { width: 100%; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
+# --- 關鍵修正：初始化 Session State，防止資料遺失 ---
+if 'raw_records' not in st.session_state:
+    st.session_state['raw_records'] = []
+if 'class_df' not in st.session_state:
+    st.session_state['class_df'] = pd.DataFrame()
+
 # --- 2. 側邊欄 ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2231/2231649.png", width=100)
+    st.image("[https://cdn-icons-png.flaticon.com/512/2231/2231649.png](https://cdn-icons-png.flaticon.com/512/2231/2231649.png)", width=100)
     st.title("🌱 篤行幼兒園")
-    st.subheader("評量系統 v2.3 (按鈕修復版)")
+    st.subheader("評量系統 v2.4 (穩健量產版)")
     
+    # 顯示目前資料庫狀態 (即時儀表板)
+    st.markdown("---")
+    record_count = len(st.session_state['raw_records'])
+    st.metric("📊 目前已暫存資料", f"{record_count} 筆")
+    if record_count > 0:
+        st.caption("✅ 資料已保存，可前往產生報告")
+    else:
+        st.caption("⚠️ 暫無資料，請先上傳分析")
+    st.markdown("---")
+
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         st.success("API 連線狀態：🟢 線上")
@@ -46,10 +58,9 @@ with st.sidebar:
         st.error("API Key 未設定")
         st.stop()
         
-    st.markdown("---")
     menu = st.radio("功能選單", ["📝 批次上傳與辨識", "📄 產生整合評量報告"])
 
-# --- 3. 核心功能 (維持 v2.2 的極速邏輯) ---
+# --- 3. 核心功能 ---
 
 def get_fast_model():
     return genai.GenerativeModel('gemini-1.5-flash')
@@ -89,23 +100,34 @@ def analyze_single_image(image_file):
     }
     """
     
-    config = genai.types.GenerationConfig(temperature=0.0, response_mime_type="application/json")
+    config = genai.types.GenerationConfig(temperature=0.0) # 移除 response_mime_type="application/json" 以避免部分格式問題
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content([prompt, image], generation_config=config)
-            return json.loads(response.text)
+            
+            # --- 關鍵修正：強力清潔 JSON 字串 ---
+            text = response.text
+            if "```json" in text:
+                text = text.replace("```json", "").replace("```", "")
+            elif "```" in text:
+                text = text.replace("```", "")
+            
+            return json.loads(text.strip())
+            
         except Exception as e:
-            if "429" in str(e):
+            if "429" in str(e): # Rate limit
                 time.sleep(2 * (attempt + 1))
                 continue
             else:
+                print(f"Error: {e}") # 在後台印出錯誤以便除錯
                 return None
     return None
 
 def process_images_parallel(files):
     results = []
+    # 限制同時 4 個，穩定為上
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         future_to_file = {executor.submit(analyze_single_image, f): f for f in files}
         
@@ -113,6 +135,7 @@ def process_images_parallel(files):
         info = st.empty()
         total = len(files)
         done = 0
+        success_count = 0
         
         for future in concurrent.futures.as_completed(future_to_file):
             f = future_to_file[future]
@@ -121,17 +144,16 @@ def process_images_parallel(files):
             bar.progress(done / total)
             
             data = future.result()
-            if data: results.append(data)
+            if data: 
+                results.append(data)
+                success_count += 1
             
-    info.text(f"✅ 完成！共處理 {total} 張照片。")
-    time.sleep(1)
     info.empty()
     bar.empty()
     return results
 
 def generate_teacher_comments_fast(student_name, records):
     model = get_fast_model()
-    
     data_text = f"幼兒：{student_name}\n"
     for r in records:
         data_text += f"[{r['area']}] 備註:{r['note']}\n"
@@ -143,16 +165,16 @@ def generate_teacher_comments_fast(student_name, records):
     格式 JSON：
     {{ "observation": "觀察...", "suggestion": "建議..." }}
     """
-    config = genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json")
+    config = genai.types.GenerationConfig(temperature=0.7)
     try:
         response = model.generate_content(prompt, generation_config=config)
-        return json.loads(response.text)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
     except:
         return {"observation": "請親師多加溝通。", "suggestion": "陪伴是最好的禮物。"}
 
 def create_word_report(grouped_data):
     doc = Document()
-    
     section = doc.sections[0]
     section.top_margin = Cm(1.27)
     section.bottom_margin = Cm(1.27)
@@ -190,7 +212,6 @@ def create_word_report(grouped_data):
         hdr = table.rows[0].cells
         hdr[0].text = "各區學習指標內容"
         hdr[1].text = "結果"
-        
         table.columns[0].width = Cm(14)
         table.columns[1].width = Cm(3)
         
@@ -210,12 +231,10 @@ def create_word_report(grouped_data):
                 row_item[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         doc.add_paragraph("")
-        
         comments = generate_teacher_comments_fast(name, records)
         
         doc.add_paragraph("【老師的觀察】").runs[0].bold = True
         doc.add_paragraph(comments['observation'])
-        
         doc.add_paragraph("【居家互動小撇步】").runs[0].bold = True
         doc.add_paragraph(comments['suggestion'])
         
@@ -234,8 +253,8 @@ def create_word_report(grouped_data):
 # --- 4. 主頁面 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 批次處理 (v2.3 按鈕修復版)")
-    st.info("💡 確保您的照片已經上傳並分析完成。")
+    st.title("📝 批次處理 (v2.4 穩健版)")
+    st.info("💡 請上傳照片，系統會自動清潔格式並存入暫存區。")
     
     files = st.file_uploader("選擇照片 (全選)", type=['jpg','png','jpeg'], accept_multiple_files=True)
     
@@ -266,40 +285,49 @@ if menu == "📝 批次上傳與辨識":
                         "note": s.get("note")
                     })
             
+            # 將新資料「追加」進 session state，而不是覆蓋
+            # 這樣您可以分批上傳 (例如先傳語文區，再傳數學區)
+            if 'raw_records' not in st.session_state: st.session_state['raw_records'] = []
+            st.session_state['raw_records'] = raw_records # 這次先用覆蓋的，避免重複測試時資料亂掉
+            
+            if 'class_df' not in st.session_state: st.session_state['class_df'] = pd.DataFrame()
             st.session_state['class_df'] = pd.DataFrame(all_data)
-            st.session_state['raw_records'] = raw_records
-            st.success(f"處理完成！共 {len(results)} 張照片。")
+            
+            st.success(f"✅ 成功處理 {len(results)} 張照片，已存入暫存區！")
+            st.info("👉 現在請點擊左側「📄 產生整合評量報告」")
+            
+        else:
+            st.error("❌ 分析失敗：沒有任何照片被成功讀取。請檢查 API Key 是否正常或重試。")
 
-    if 'class_df' in st.session_state:
+    if not st.session_state['class_df'].empty:
         st.dataframe(st.session_state['class_df'])
 
 elif menu == "📄 產生整合評量報告":
     st.title("📄 報告生成")
-    if 'raw_records' in st.session_state:
+    
+    # 檢查有沒有資料
+    if st.session_state['raw_records']:
         grouped = {}
         for r in st.session_state['raw_records']:
             name = r['name']
             if name not in grouped: grouped[name] = []
             grouped[name].append(r)
         
-        st.write(f"目前有 {len(grouped)} 位幼兒的資料準備生成。")
+        st.write(f"📚 資料庫就緒：共 {len(grouped)} 位幼兒的完整紀錄。")
 
-        # 1. 產生報告按鈕
         if st.button("✨ 點擊這裡產生 Word 檔"):
-            with st.spinner("正在努力寫報告，請稍候..."):
+            with st.spinner("AI 園長正在動筆寫評語..."):
                 doc_file = create_word_report(grouped)
-                # 關鍵修正：把產生的檔案存入 Session State
                 st.session_state['generated_doc'] = doc_file.getvalue()
-                st.success("報告產生完畢！請按下方按鈕下載。")
+                st.success("報告產生完畢！")
         
-        # 2. 下載按鈕 (只要 Session 裡有檔案，這個按鈕就會一直存在)
         if 'generated_doc' in st.session_state:
             st.download_button(
                 label="📥 點我下載 Word 評量報告",
                 data=st.session_state['generated_doc'],
-                file_name="篤行幼兒園_全班評量報告_v2.3.docx",
+                file_name="篤行幼兒園_全班評量報告_v2.4.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
             
     else:
-        st.warning("⚠️ 請先回上一頁上傳並分析照片。")
+        st.warning("⚠️ 暫存區是空的！請先回上一頁上傳並分析照片。")
