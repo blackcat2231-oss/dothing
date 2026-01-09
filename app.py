@@ -29,19 +29,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 關鍵修正：初始化 Session State，防止資料遺失 ---
+# --- 初始化 Session State (防止資料遺失) ---
 if 'raw_records' not in st.session_state:
     st.session_state['raw_records'] = []
 if 'class_df' not in st.session_state:
     st.session_state['class_df'] = pd.DataFrame()
 
-# --- 2. 側邊欄 ---
+# --- 2. 側邊欄 (移除易碎的網路圖片) ---
 with st.sidebar:
-    st.image("[https://cdn-icons-png.flaticon.com/512/2231/2231649.png](https://cdn-icons-png.flaticon.com/512/2231/2231649.png)", width=100)
-    st.title("🌱 篤行幼兒園")
-    st.subheader("評量系統 v2.4 (穩健量產版)")
+    # 移除 st.image，改用純文字+Emoji，保證不當機
+    st.header("🌱 篤行幼兒園") 
+    st.subheader("評量系統 v2.5 (穩定版)")
     
-    # 顯示目前資料庫狀態 (即時儀表板)
+    # 顯示目前資料庫狀態
     st.markdown("---")
     record_count = len(st.session_state['raw_records'])
     st.metric("📊 目前已暫存資料", f"{record_count} 筆")
@@ -100,14 +100,14 @@ def analyze_single_image(image_file):
     }
     """
     
-    config = genai.types.GenerationConfig(temperature=0.0) # 移除 response_mime_type="application/json" 以避免部分格式問題
+    config = genai.types.GenerationConfig(temperature=0.0)
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content([prompt, image], generation_config=config)
             
-            # --- 關鍵修正：強力清潔 JSON 字串 ---
+            # 強力清潔 JSON
             text = response.text
             if "```json" in text:
                 text = text.replace("```json", "").replace("```", "")
@@ -121,13 +121,12 @@ def analyze_single_image(image_file):
                 time.sleep(2 * (attempt + 1))
                 continue
             else:
-                print(f"Error: {e}") # 在後台印出錯誤以便除錯
+                print(f"Error: {e}")
                 return None
     return None
 
 def process_images_parallel(files):
     results = []
-    # 限制同時 4 個，穩定為上
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         future_to_file = {executor.submit(analyze_single_image, f): f for f in files}
         
@@ -253,7 +252,7 @@ def create_word_report(grouped_data):
 # --- 4. 主頁面 ---
 
 if menu == "📝 批次上傳與辨識":
-    st.title("📝 批次處理 (v2.4 穩健版)")
+    st.title("📝 批次處理 (v2.5 穩定版)")
     st.info("💡 請上傳照片，系統會自動清潔格式並存入暫存區。")
     
     files = st.file_uploader("選擇照片 (全選)", type=['jpg','png','jpeg'], accept_multiple_files=True)
@@ -285,10 +284,9 @@ if menu == "📝 批次上傳與辨識":
                         "note": s.get("note")
                     })
             
-            # 將新資料「追加」進 session state，而不是覆蓋
-            # 這樣您可以分批上傳 (例如先傳語文區，再傳數學區)
+            # 使用 append 邏輯確保資料累加
             if 'raw_records' not in st.session_state: st.session_state['raw_records'] = []
-            st.session_state['raw_records'] = raw_records # 這次先用覆蓋的，避免重複測試時資料亂掉
+            st.session_state['raw_records'] = raw_records 
             
             if 'class_df' not in st.session_state: st.session_state['class_df'] = pd.DataFrame()
             st.session_state['class_df'] = pd.DataFrame(all_data)
@@ -305,7 +303,6 @@ if menu == "📝 批次上傳與辨識":
 elif menu == "📄 產生整合評量報告":
     st.title("📄 報告生成")
     
-    # 檢查有沒有資料
     if st.session_state['raw_records']:
         grouped = {}
         for r in st.session_state['raw_records']:
@@ -321,11 +318,12 @@ elif menu == "📄 產生整合評量報告":
                 st.session_state['generated_doc'] = doc_file.getvalue()
                 st.success("報告產生完畢！")
         
+        # 只要檔案存在，就顯示下載按鈕
         if 'generated_doc' in st.session_state:
             st.download_button(
                 label="📥 點我下載 Word 評量報告",
                 data=st.session_state['generated_doc'],
-                file_name="篤行幼兒園_全班評量報告_v2.4.docx",
+                file_name="篤行幼兒園_全班評量報告_v2.5.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
             
